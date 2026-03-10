@@ -1,0 +1,63 @@
+# ============================================
+# STM32 + Keil MDK-ARM 项目 .gitignore
+# ============================================
+
+# ----------
+# 编译生成的文件
+# ----------
+*.o
+*.axf
+*.hex
+*.map
+*.htm
+*.crf
+*.d
+*.elf
+*.bin
+
+# ----------
+# Keil MDK 特定文件
+# ----------
+# 用户特定配置（不应提交）
+*.uvoptx
+*.uvguix.*
+*.uvguix
+*.dep
+*.lnp
+
+# ----------
+# 构建输出目录
+# ----------
+MDK-ARM/LED/
+MDK-ARM/*/DebugConfig/
+MDK-ARM/*/Listings/
+MDK-ARM/*/Objects/
+
+# ----------
+# STM32CubeMX 临时文件
+# ----------
+*.ioc.bak
+.mxproject
+
+# ----------
+# 通用临时文件
+# ----------
+*.tmp
+*.bak
+*.swp
+*~
+*.log
+
+# ----------
+# 操作系统文件
+# ----------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ----------
+# IDE 和编辑器
+# ----------
+.vscode/
+.idea/
+*.sublime-*
