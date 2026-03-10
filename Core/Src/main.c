@@ -24,6 +24,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "uart_frame.h"
+#ifdef UART_LOOPBACK_TEST_ENABLE
+  #include "uart_loopback_test.h"
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -104,8 +107,28 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#ifdef UART_LOOPBACK_TEST_ENABLE
+      // 测试模式：执行UART回环测试
+      if(uart_loopback_test_execute()) {
+        // 测试通过 - 绿灯闪烁3次
+        for(int i = 0; i < 3; i++) {
+          led_on(led_g);
+          HAL_Delay(100);
+          led_off(led_g);
+          HAL_Delay(100);
+        }
+      } else {
+        // 测试失败 - 红灯长亮2秒
+        led_on(led_r);
+        HAL_Delay(2000);
+        led_off(led_r);
+      }
+      HAL_Delay(UART_LOOPBACK_TEST_INTERVAL_MS);
+#else
+      // 正常模式：发送控制命令
       Send_Control_Command();
       HAL_Delay(2000);  // 2 秒延时，0.5Hz 发送频率
+#endif
     }
   /* USER CODE END 3 */
 }
