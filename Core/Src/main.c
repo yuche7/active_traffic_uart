@@ -93,10 +93,8 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-		printf("=== AGV Control System Start ===\r\n");
-		HAL_Delay(100);
-		// Send control command
-		Send_Control_Command();
+    printf("=== AGV Control System Start ===\r\n");
+    HAL_Delay(100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -106,6 +104,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+      Send_Control_Command();
+      HAL_Delay(2000);  // 2 秒延时，0.5Hz 发送频率
     }
   /* USER CODE END 3 */
 }
