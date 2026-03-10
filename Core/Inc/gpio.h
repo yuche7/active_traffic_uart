@@ -32,7 +32,6 @@ extern "C" {
 typedef enum{
 	led_r=1,
 	led_g,
-	led_b,
 	led_all
 }led_type;
 	
