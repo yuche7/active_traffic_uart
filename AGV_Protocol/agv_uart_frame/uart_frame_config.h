@@ -161,9 +161,9 @@ extern "C"
         struct
         {
             // 负角度为顺时针，正角度为逆时针，0°为车头朝向正前方
-            float_t angle_left;
-            float_t angle_right;
-            float_t angle_camera;
+            float angle_left;
+            float angle_right;
+            float angle_camera;
         } angles; // 舵轮角度
 
         struct
