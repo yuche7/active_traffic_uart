@@ -49,9 +49,13 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-#define RX_BUFFER_SIZE 2048
-uint8_t rx_buffer[RX_BUFFER_SIZE];
-uint16_t rx_index = 0;
+#define UWB_RX_BUFFER_SIZE 2048
+uint8_t uwb_rx_buffer[UWB_RX_BUFFER_SIZE];
+uint16_t uwb_rx_index = 0;
+
+#define AGV_RX_BUFFER_SIZE 2048
+uint8_t agv_rx_buffer[AGV_RX_BUFFER_SIZE];
+uint16_t agv_rx_index = 0;
 
 // Status feedback data
 status_feedback_t status_feedback;
@@ -68,13 +72,31 @@ volatile uint8_t uwb_data_ready = 0;
 // UWB data
 int32_t uwb_x = 0;
 int32_t uwb_y = 0;
-uint32_t uwb_frame_count = 0;
+uint32_t uwb_valid_frame_count = 0;
 uint8_t uwb_data_valid = 0;
 
+// UWB frame metadata (for deferred parsing)
+volatile uint8_t uwb_frame_found = 0;
+size_t uwb_frame_start = 0;
+size_t uwb_frame_length = 0;
+uint32_t uwb_last_parse_time = 0;
+uint32_t uwb_parse_interval = 1000; // Parse every 1 second
+
+// AGV frame metadata (for on-demand parsing)
+volatile uint8_t agv_frame_found = 0;
+size_t agv_frame_start = 0;
+size_t agv_frame_length = 0;
+
 // Debug counters
-uint32_t interrupt_count = 0;
-uint32_t byte_count = 0;
-uint32_t frame_count = 0;
+uint32_t uwb_interrupt_count = 0;
+uint32_t uwb_byte_count = 0;
+uint32_t uwb_frame_detected_count = 0;
+uint32_t uwb_frame_parsed_count = 0;
+
+uint32_t agv_interrupt_count = 0;
+uint32_t agv_byte_count = 0;
+uint32_t agv_frame_detected_count = 0;
+uint32_t agv_frame_parsed_count = 0;
 
 /* USER CODE END PV */
 
@@ -82,13 +104,15 @@ uint32_t frame_count = 0;
 void SystemClock_Config(void);
 static void MPU_Config(void);
 void turn_left(void);
-/* USER CODE BEGIN PFP */
+/* USER CODE BEGIN FPP */
 void Process_UWB_Data(void);
 void Send_Control_Command(void); // Declare control command sending function
 void Process_Status_Feedback(void);
 void Query_Status_Feedback(void);
 void parse_received_frame(const uint8_t* frame_data, size_t frame_len);
-/* USER CODE END PFP */
+void parse_uwb_frame(void);  // Periodic UWB frame parsing
+void parse_agv_frame(void);  // On-demand AGV frame parsing
+/* USER CODE END FFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
@@ -132,18 +156,23 @@ int main(void)
   MX_USART3_UART_Init();
 
   /* USER CODE BEGIN 2 */
-  // Enable UART1 global interrupt in NVIC
-  HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(USART1_IRQn);
-  
-  // Start USART1 receive interrupt (关键：必须开启接收中断)
-  HAL_UART_Receive_IT(&huart1, &rx_buffer[rx_index], 1);
-  
-  printf("UART1 interrupt started. System ready.\r\n");
-  printf("Will query status every %lu ms.\r\n\r\n", status_query_interval);
+  // USART2: printf 输出通道（已在 fputc -> huart2 中重定向）
+
+  // USART1: UWB receive (独立通道)
+  HAL_UART_Receive_IT(&huart1, &uwb_rx_buffer[uwb_rx_index], 1);
+
+  // USART3: AGV状态接收通道
+  HAL_UART_Receive_IT(&huart3, &agv_rx_buffer[agv_rx_index], 1);
+
+  printf("\nUSART1 UWB Rx interrupt started. System ready.\r\n");
+  printf("USART3 AGV status Rx interrupt started.\r\n");
+  printf("UWB frames will be parsed every %lu ms.\r\n\r\n", uwb_parse_interval);
   
   Send_Control_Command();
-  HAL_Delay(200); // 2 秒延时，0.5Hz 发送频率
+  HAL_Delay(200); // 200ms延时，0.5Hz 发送频率
+  
+  // Initialize timers
+  uwb_last_parse_time = HAL_GetTick();
     
   /* USER CODE END 2 */
 
@@ -185,23 +214,23 @@ int main(void)
 #else
     // 未启用回环测试编译：走正常AGV控制发送逻辑
   
-    if (status_feedback_ready) {
-      status_feedback_ready = 0;
-      Process_Status_Feedback();
-    } 
+    // Every 1 second: Parse UWB frames (periodic)
+    uint32_t current_time = HAL_GetTick();
+    if (current_time - uwb_last_parse_time >= uwb_parse_interval) {
+      parse_uwb_frame();
+      uwb_last_parse_time = current_time;
+    }
 
-    //Periodically query status feedback
-    /*uint32_t current_time = HAL_GetTick();
-    if (current_time - last_status_query_time >= status_query_interval) {
-      printf("\r\n--- Querying Status Feedback ---\r\n");
-      Query_Status_Feedback();
-      last_status_query_time = current_time;
-    }*/
-
-     // Process UWB data
+    // On-demand: Process UWB data when available
     if (uwb_data_ready) {
       uwb_data_ready = 0;
       Process_UWB_Data();
+    }
+
+    // On-demand: Query and process AGV status (call parse_agv_frame manually when needed)
+    if (status_feedback_ready) {
+      status_feedback_ready = 0;
+      Process_Status_Feedback();
     }
     
 #endif
@@ -457,65 +486,79 @@ void Process_Status_Feedback(void)
   */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-if (huart->Instance == USART1)
+  if (huart->Instance == USART1)
   {
-    // 保存当前索引处的字节（HAL库已将接收到的字节存储在rx_buffer[rx_index]）
-    uint8_t received_byte = rx_buffer[rx_index];
-    
-    // 增加计数器
-    interrupt_count++;
-    byte_count++;
-    
-    // 调试：显示接收到的字节
-    if (byte_count <= 5) {
-      printf("[IRQ] Byte %lu: 0x%02X at index %u\r\n", 
-             byte_count, received_byte, rx_index);
+    uint8_t received_byte = uwb_rx_buffer[uwb_rx_index];
+    uwb_interrupt_count++;
+    uwb_byte_count++;
+
+    if (uwb_byte_count <= 16) {
+      printf("[SUART1 IRQ] Byte %lu: 0x%02X at index %u\r\n", uwb_byte_count, received_byte, uwb_rx_index);
     }
-    
-    // 增加缓冲区索引
-    rx_index++;
-    
-    // 正确的缓冲区溢出保护
-    if (rx_index >= RX_BUFFER_SIZE) {
-      // 重置索引，但不清除缓冲区
-      printf("[WARN] Buffer full, wrapping around...\r\n");
-      rx_index = 0;
+
+    uwb_rx_index++;
+    if (uwb_rx_index >= UWB_RX_BUFFER_SIZE) {
+      printf("[WARN] UWB buffer full, wrapping around...\r\n");
+      uwb_rx_index = 0;
     }
-    
-    // 在缓冲区中查找完整的帧
+
+    // Only detect frames, don't parse yet (parsing happens in main loop with timer)
     size_t frame_start = 0;
     size_t frame_length = 0;
-    
-    int32_t find_result = uart_frame_find(rx_buffer, rx_index, &frame_start, &frame_length);
-    
+    int32_t find_result = uart_frame_find(uwb_rx_buffer, uwb_rx_index, &frame_start, &frame_length);
+
     if (find_result == UART_FRAME_OK) {
-      frame_count++;
-      printf("[FRAME] Found #%lu! Start: %lu, Length: %lu\r\n", 
-             frame_count, frame_start, frame_length);
-      
-      // 解析找到的帧
-      parse_received_frame(&rx_buffer[frame_start], frame_length);
-      
-      // 从缓冲区中移除已处理的数据
-      size_t bytes_to_remove = frame_start + frame_length;
-      if (bytes_to_remove > 0) {
-        size_t remaining = rx_index - bytes_to_remove;
-        if (remaining > 0) {
-          memmove(rx_buffer, &rx_buffer[bytes_to_remove], remaining);
-        }
-        rx_index = (uint16_t)remaining;
-        printf("[BUFFER] Removed %lu bytes, now %u bytes remain\r\n", 
-               bytes_to_remove, rx_index);
-      }
+      uwb_frame_detected_count++;
+      printf("[FRAME] UWB frame #%lu found: Start=%lu Length=%lu (will parse periodically)\r\n", 
+             uwb_frame_detected_count, frame_start, frame_length);
+      // Store frame metadata for later parsing
+      uwb_frame_found = 1;
+      uwb_frame_start = frame_start;
+      uwb_frame_length = frame_length;
     } else {
-      // 还没有找到完整的帧
-      if (byte_count % 100 == 0) {
-        printf("[BUFFER] %u bytes, waiting for frame...\r\n", rx_index);
+      if (uwb_byte_count % 100 == 0) {
+        printf("[BUFFER] %u bytes, waiting for frame... (UWB)\r\n", uwb_rx_index);
       }
     }
-    
-    // 继续接收下一个字节
-    HAL_UART_Receive_IT(&huart1, &rx_buffer[rx_index], 1);
+
+    HAL_UART_Receive_IT(&huart1, &uwb_rx_buffer[uwb_rx_index], 1);
+  }
+  else if (huart->Instance == USART3)
+  {
+    uint8_t received_byte = agv_rx_buffer[agv_rx_index];
+    agv_interrupt_count++;
+    agv_byte_count++;
+
+    if (agv_byte_count <= 16) {
+      printf("[USART3 IRQ] Byte %lu: 0x%02X at index %u\r\n", agv_byte_count, received_byte, agv_rx_index);
+    }
+
+    agv_rx_index++;
+    if (agv_rx_index >= AGV_RX_BUFFER_SIZE) {
+      printf("[WARN] AGV buffer full (USART3), wrapping around...\r\n");
+      agv_rx_index = 0;
+    }
+
+    // Only detect frames, don't parse yet (parsing happens on-demand in main loop)
+    size_t frame_start = 0;
+    size_t frame_length = 0;
+    int32_t find_result = uart_frame_find(agv_rx_buffer, agv_rx_index, &frame_start, &frame_length);
+
+    if (find_result == UART_FRAME_OK) {
+      agv_frame_detected_count++;
+      printf("[FRAME] AGV frame #%lu found: Start=%lu Length=%lu (will parse on-demand)\r\n", 
+             agv_frame_detected_count, frame_start, frame_length);
+      // Store frame metadata for on-demand parsing
+      agv_frame_found = 1;
+      agv_frame_start = frame_start;
+      agv_frame_length = frame_length;
+    } else {
+      if ((agv_byte_count % 100) == 0) {
+        printf("[BUFFER] %u bytes, waiting for frame... (AGV)\r\n", agv_rx_index);
+      }
+    }
+
+    HAL_UART_Receive_IT(&huart3, &agv_rx_buffer[agv_rx_index], 1);
   }
 }
 
@@ -552,7 +595,7 @@ void parse_received_frame(const uint8_t* frame_data, size_t frame_len)
           uwb_data_valid = 1;
           uwb_x = sensor_data.uwb.x;
           uwb_y = sensor_data.uwb.y;
-          uwb_frame_count++;
+          uwb_valid_frame_count++;
           uwb_data_ready = 1;
           printf("[UWB] Valid data ready: x=%d, y=%d\r\n", uwb_x, uwb_y);
         } else {
@@ -593,10 +636,73 @@ void parse_received_frame(const uint8_t* frame_data, size_t frame_len)
 void Process_UWB_Data(void)
 {
   if (uwb_data_valid) {
-    printf("[%lu] UWB: x=%d cm, y=%d cm\r\n", uwb_frame_count, uwb_x, uwb_y);
+    printf("[%lu] UWB: x=%d cm, y=%d cm\r\n", uwb_valid_frame_count, uwb_x, uwb_y);
   }else {
     printf("[UWB] No valid data to display\r\n");
   }
+}
+
+
+/**
+  * @brief Parse UWB frame (called periodically every 1 second)
+  */
+void parse_uwb_frame(void)
+{
+  if (!uwb_frame_found) {
+    return;
+  }
+
+  printf("[UWB PARSE] Processing UWB frame: Start=%lu Length=%lu\r\n", 
+         uwb_frame_start, uwb_frame_length);
+
+  // Parse the frame
+  parse_received_frame(&uwb_rx_buffer[uwb_frame_start], uwb_frame_length);
+
+  // Clean up buffer after parsing
+  size_t bytes_to_remove = uwb_frame_start + uwb_frame_length;
+  if (bytes_to_remove > 0) {
+    size_t remaining = uwb_rx_index - bytes_to_remove;
+    if (remaining > 0) {
+      memmove(uwb_rx_buffer, &uwb_rx_buffer[bytes_to_remove], remaining);
+    }
+    uwb_rx_index = (uint16_t)remaining;
+    printf("[BUFFER] Removed %lu bytes, now %u bytes remain (UWB)\r\n", bytes_to_remove, uwb_rx_index);
+  }
+
+  uwb_frame_parsed_count++;
+  uwb_frame_found = 0;
+}
+
+
+/**
+  * @brief Parse AGV frame (called on-demand)
+  */
+void parse_agv_frame(void)
+{
+  if (!agv_frame_found) {
+    printf("[AGV PARSE] No AGV frame found\r\n");
+    return;
+  }
+
+  printf("[AGV PARSE] Processing AGV frame: Start=%lu Length=%lu\r\n", 
+         agv_frame_start, agv_frame_length);
+
+  // Parse the frame
+  parse_received_frame(&agv_rx_buffer[agv_frame_start], agv_frame_length);
+
+  // Clean up buffer after parsing
+  size_t bytes_to_remove = agv_frame_start + agv_frame_length;
+  if (bytes_to_remove > 0) {
+    size_t remaining = agv_rx_index - bytes_to_remove;
+    if (remaining > 0) {
+      memmove(agv_rx_buffer, &agv_rx_buffer[bytes_to_remove], remaining);
+    }
+    agv_rx_index = (uint16_t)remaining;
+    printf("[BUFFER] Removed %lu bytes, now %u bytes remain (AGV)\r\n", bytes_to_remove, agv_rx_index);
+  }
+
+  agv_frame_parsed_count++;
+  agv_frame_found = 0;
 }
 
 
